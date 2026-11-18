@@ -1,106 +1,140 @@
 # Tissue-Guided Bias Field Correction
 
-Tissue-guided bias field correction for brain MRI that leverages tissue segmentation to recover high-frequency intensity variations typically lost in standard N4 correction. Part of the MacaSurfer cortical analysis pipeline.
+Reliable-core Gaussian and CUDA RBF bias correction for brain MRI. This revision
+ports the `reliable-core-v2` implementation from FastPrep BFC 1.0.0 back into the
+original repository. **RBF is the default; it requires CUDA and never silently
+falls back to CPU.** Gaussian is an explicit CPU alternative.
 
-## Motivation
+This is a research implementation, not a claim of clinical or whole-brain
+validation. The previously reviewed Gaussian example still showed local
+cerebellar/brainstem overcorrection. RBF improvements in one real T1 example do
+not establish correctness for every anatomy, session, or real T2 acquisition.
 
-Standard N4 bias field correction tends to over-smooth intensity profiles, particularly in deep cortical folds where thin white matter structures require precise intensity recovery. The tissue-guided approach addresses this by using tissue class information (GM, WM, CSF) to constrain the bias field estimation, preserving high-frequency intensity variations that are critical for accurate cortical surface reconstruction.
+## What changed
 
-![Tissue-Guided Bias Field Correction](figures/tissue_guided_bfc.png)
+- Fit only independent, physically eroded GM/WM cores, with within-class log-MAD
+  outlier rejection; retain the original tissue labels.
+- Keep soft tissue weights inside their own reliable cores; do not invent dark
+  background observations from unmodeled brain tissue.
+- Apply the fitted field continuously throughout the brain mask, including
+  tissue label zero. Preserve outside-brain and zero-signal intensities.
+- Use actual nearest supported donors for Gaussian residual extrapolation.
+- Use stable softmax RBF weights in fitting and export, with export gradients
+  disabled and explicit CUDA validation.
+- Validate grids, finite values, labels and fields, refuse output overwrites,
+  and save fitting support and execution provenance.
 
-**Figure 1. Impact of Tissue-Guided Bias Field Correction on White Surface Generation.** (a) Comparison of bias field-corrected T1 between standard N4 correction (top) and the proposed Tissue-Guided method (bottom). The proposed method recovers high-frequency variations in deep cortical folds. (b) The resulting white matter surface reconstructions. The red insets demonstrate that Tissue-Guided correction prevents boundary erosion in the occipital lobes (bottom right), preserving the continuity of thin white matter strands compared to N4 correction (top right).
-
-## Methods
-
-Two complementary approaches are provided:
-
-### 1. Gaussian Mixture (EM-style) — `bfc_gauss_mixture.py`
-
-Iterative expectation-maximization framework that alternates between:
-- Estimating class-conditional intensity distributions (tissue means and variances)
-- Computing the bias field residual from tissue-weighted intensity deviations
-- Progressively refining the bias estimate across multiple scales (coarse-to-fine kernel schedule)
-
-Suitable for standard T1/T2 brain MRI with or without initial tissue priors.
-
-### 2. RBF Scatter-Point (GPU-accelerated) — `bfc_rbf_scatter.py`
-
-Fast GPU-accelerated bias field estimation using adaptive scatter control points with RBF interpolation:
-- Adaptive control point placement: uniform sampling combined with high-variance region targeting
-- Soft tissue labels with Gaussian smoothing for robust tissue probability estimation
-- Regularized optimization (bias energy, point spacing, boundary constraints, gradient smoothness)
-- Sub-linear complexity via K-nearest-neighbor RBF approximation
-
-Suitable for large datasets and scenarios requiring fast, flexible bias field modeling.
+See [the detailed comparison and migration notes](docs/RELIABLE_CORE_V2.md).
+The original scripts and their historical README remain under
+`tissue_bfc/_legacy/` and [docs/README-legacy.md](docs/README-legacy.md), respectively.
+The original figure and example notebook concern the historical method, not
+independent validation of this revision.
 
 ## Installation
 
+Use Python 3.10 or newer and a PyTorch installation with CUDA support for RBF:
+
 ```bash
-pip install numpy scipy nibabel SimpleITK torch scikit-learn
+python -m pip install .
 ```
 
-For GPU acceleration (recommended for `bfc_rbf_scatter.py`), ensure PyTorch with CUDA support is installed.
+The package declares NumPy, SciPy, nibabel, SimpleITK, scikit-learn and PyTorch.
+Installing the package alone does not guarantee a working CUDA runtime; RBF
+checks the selected device before creating outputs. Gaussian runs on CPU.
+No FreeSurfer, Nextflow, FastPrep checkout or external model weights are needed.
+
+## Input contract
+
+Provide nonnegative, finite, 3D NIfTI images on the same physical grid, with
+voxel spacing expressed in millimeters. The brain mask must contain only 0/1.
+Tissue labels must be **0 = unmodeled/background, 1 = CSF, 2 = GM, 3 = WM**.
+Do not pass raw FreeSurfer/SynthSeg aseg label numbers as these tissue codes.
+Label zero inside the brain mask is valid and is corrected, but never fitted.
+Both GM and WM must retain enough reliable samples; failure is explicit.
 
 ## Usage
 
-### Gaussian Mixture Method
+RBF, preserving fitted tissue contrast for either T1- or T2-weighted inputs:
 
 ```bash
-python bfc_gauss_mixture.py \
-    --input_img T1w.nii.gz \
-    --input_lab tissue_labels.nii.gz \
-    --input_msk brain_mask.nii.gz \
-    --output_img T1w_corrected.nii.gz \
-    --output_bias bias_field.nii.gz \
-    --modality T1
+python -m tissue_bfc \
+  --input_img T1w.nii.gz --input_lab tissue_labels.nii.gz \
+  --input_msk brain_mask.nii.gz \
+  --output_img new-rbf/corrected.nii.gz --output_bias new-rbf/field.nii.gz \
+  --device cuda:0
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `--input_img` | Input T1/T2-weighted image |
-| `--input_lab` | Initial tissue segmentation (GM=2, WM=3) |
-| `--input_msk` | Brain mask |
-| `--bias_max_iter` | Number of bias estimation iterations (default: 10) |
-| `--max_kernel` | Initial bias field smoothing kernel size (default: 9) |
-| `--modality` | `T1`, `T2`, or `None` (preserve original contrast) |
-
-### RBF Scatter-Point Method
+Gaussian, also preserving fitted contrast by default:
 
 ```bash
-python bfc_rbf_scatter.py \
-    --input_img T1w.nii.gz \
-    --input_lab tissue_labels.nii.gz \
-    --input_msk brain_mask.nii.gz \
-    --output_img T1w_corrected.nii.gz \
-    --output_bias bias_field.nii.gz \
-    --n_points 48 \
-    --rbf_sigma 0.05 \
-    --max_iter 25
+python -m tissue_bfc --method gaussian \
+  --input_img T1w.nii.gz --input_lab tissue_labels.nii.gz \
+  --input_msk brain_mask.nii.gz \
+  --output_img new-gaussian/corrected.nii.gz --output_bias new-gaussian/field.nii.gz
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `--n_points` | Number of scatter control points (default: 48) |
-| `--rbf_sigma` | RBF kernel width (default: 0.05) |
-| `--max_iter` | Maximum optimization epochs (default: 25) |
-| `--use_label_value` | Use single label value with B-spline N4 instead (bypasses RBF) |
+`python bfc_rbf_scatter.py` and `python bfc_gauss_mixture.py` accept the same
+arguments and select their respective methods. Installed commands are
+`tissue-bfc`, `bfc-rbf`, and `bfc-gaussian`.
 
-## Repository Structure
+| Parameter | Default / meaning |
+| --- | --- |
+| `--gm-core-mm`, `--wm-core-mm` | 1 / 2 mm; independent tissue-core erosion |
+| `--core-log-mad-limit` | 3.5 scaled MAD; fitting outlier rejection, not a QC threshold |
+| `--seed` | 0 |
+| `--device` | `cuda:0` for RBF; visible-device numbering follows `CUDA_VISIBLE_DEVICES` |
+| `--n_points`, `--k_neighbors` | 48 / 48 |
+| `--rbf_max_iter`, `--max_iter` | 25; the latter is a compatibility alias |
+| `--rbf_sigma`, `--soft_sigma`, `--tol` | 0.05 / 0.5 / 1e-6 |
+| `--bias_max_iter`, `--max_kernel` | Gaussian: 10 / 9 |
+| `--min_kernel`, `--label_soft_kernel` | Gaussian: spacing-derived / 0.4 |
+| `--refine_max_iter` | Must be 0; tissue priors remain fixed |
+| `--modality` | `None` preserves contrast; fixed `T1` / `T2` targets are Gaussian-only |
 
+`--modality T1/T2` is not an input-modality declaration: it requests Gaussian
+fixed intensity targets and is not supported by RBF. Gaussian smoothing widths
+are in voxel units; the tissue-core erosion distances are in millimeters.
+Removed historical flags are described in the migration notes and are not
+silently ignored.
+
+## Outputs and field conventions
+
+Every attempt writes the requested corrected image and field, plus
+`fit-mask.nii.gz`, `fit-labels.nii.gz` and `support.json` next to the corrected
+image. RBF also writes `fitted-control-points.npz`. Use a new output directory
+for every attempt; existing outputs are never overwritten.
+
+**The raw field conventions differ:**
+
+- RBF exports a **divisor**: `corrected = original / field` inside the brain.
+- Gaussian exports a **multiplier**: `corrected = original * field` inside the brain.
+- Both export field 1 outside the brain and preserve the original signal there.
+- `support.json` records `field_representation`, the actual fitting device,
+  parameters, fitting support, status, and `scientific_approval: not_performed`.
+
+The standalone outputs do not include WM110 global normalization. FastPrep's
+separate adapter converts the RBF field to a multiplier before publishing a
+bias factor; do not confuse that factor with this CLI's raw field.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+TISSUE_BFC_TEST_CUDA=cuda:0 python -m unittest discover -s tests -v
 ```
-├── bfc_gauss_mixture.py       # EM-style iterative bias field correction
-├── bfc_rbf_scatter.py         # GPU-accelerated scatter-point RBF correction
-├── examples/
-│   └── tissue_guided_biasfieldcorrection_examples.ipynb
-├── resources/
-│   ├── T1w_04mm.nii.gz         # Example T1 image
-│   └── T1w_label_04mm.nii.gz   # Example tissue labels
-└── figures/
-    └── tissue_guided_bfc.png   # Figure 1
-```
 
-## Citation
+CUDA integration is opt-in and exercises synthetic T1/T2 images. Unit and
+synthetic integration tests are not substitutes for reviewing corrected images
+on common grids and display scales. See [validation notes](docs/VALIDATION.md).
 
-If you use this method in your research, please cite:
+## Citation and historical material
+
+The original methods form part of the MacaSurfer cortical analysis pipeline.
+Retain the original citation when using this work:
 
 > Wei, Y. et al. *MacaSurfer: unified surface-volume mapping of the macaque brain across the lifespan.* 2026.06.14.732101 Preprint at https://doi.org/10.64898/2026.06.14.732101 (2026).
+
+The original example images, notebook, and figure remain in the repository.
+The notebook has not been migrated to the reliable-core CLI. No new license
+terms are introduced by this port; the original snapshot contained no separate
+license file.

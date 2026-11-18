@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tissue-guided-bias-field-correction"
+version = "1.0.0"
+description = "Reliable-core tissue-guided Gaussian and CUDA RBF bias correction"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "nibabel", "SimpleITK", "scikit-learn", "torch"]
+
+[project.scripts]
+tissue-bfc = "tissue_bfc.cli:main"
+bfc-rbf = "tissue_bfc.cli:rbf_main"
+bfc-gaussian = "tissue_bfc.cli:gaussian_main"
+
+[tool.setuptools.packages.find]
+include = ["tissue_bfc*"]
