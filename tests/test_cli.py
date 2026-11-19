@@ -78,6 +78,7 @@ class CommandTests(unittest.TestCase):
         np.testing.assert_allclose(nib.load(self.field).get_fdata(), 1, atol=1e-6)
         report = json.loads((self.corrected.parent / "support.json").read_text())
         self.assertEqual(report["method"], "gaussian")
+        self.assertEqual(report["toolkit_version"], "1.1.0")
         self.assertEqual(report["implementation"], "reliable-core-v2")
         self.assertEqual(report["field_representation"], "multiplier")
         self.assertEqual(report["fitting"]["device"], "cpu")
@@ -175,6 +176,20 @@ class CommandTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 cuda_device("cuda:0")
 
+    def test_failed_rbf_fit_records_model_revision_and_bounds(self):
+        from tissue_bfc.cli import main
+
+        with patch("tissue_bfc.support.cuda_device", return_value="cuda:0"), patch(
+                "tissue_bfc.support.rbf_field", side_effect=RuntimeError("synthetic bounded fit failure")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic bounded fit failure"):
+                main([*self.arguments, "--method", "rbf"])
+        report = json.loads((self.corrected.parent / "support.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["rbf_model_revision"], "bounded-sigmoid-v1")
+        self.assertEqual(report["rbf_field_bounds"], {"minimum": 1e-6, "maximum": 100.0})
+        self.assertEqual(report["scientific_approval"], "not_performed")
+        self.assertFalse(self.corrected.exists())
+
 
 @unittest.skipUnless(AVAILABLE, "Synthetic integration needs the declared scientific dependencies")
 class SyntheticIntegrationTests(unittest.TestCase):
@@ -232,6 +247,7 @@ class SyntheticIntegrationTests(unittest.TestCase):
                     field = nib.load(field_path).get_fdata()
                     report = json.loads((output.parent / "support.json").read_text())
                     self.assertEqual(report["status"], "completed")
+                    self.assertEqual(report["toolkit_version"], "1.1.0")
                     self.assertEqual(report["implementation"], "reliable-core-v2")
                     self.assertEqual(report["field_representation"], "divisor" if method == "rbf" else "multiplier")
                     self.assertEqual(report["fitting"]["soft_weight_outside_fit_support"], 0)
@@ -252,6 +268,18 @@ class SyntheticIntegrationTests(unittest.TestCase):
                         self.assertTrue(report["fitting"]["device"].startswith("cuda:"))
                         self.assertGreater(report["fitting"]["peak_gpu_allocated_bytes"], 0)
                         self.assertTrue((output.parent / "fitted-control-points.npz").is_file())
+                        self.assertTrue(np.all(field <= 100))
+                        self.assertEqual(report["rbf_model_revision"], "bounded-sigmoid-v1")
+                        self.assertEqual(report["rbf_field_bounds"], {"minimum": 1e-6, "maximum": 100.0})
+                        self.assertEqual(report["fitting"]["model_revision"], "bounded-sigmoid-v1")
+                        self.assertEqual(report["fitting"]["field_bounds"], {"minimum": 1e-6, "maximum": 100.0})
+                        with np.load(output.parent / "fitted-control-points.npz") as fitted:
+                            self.assertTrue(np.isfinite(fitted["point_logits"]).all())
+                            self.assertTrue(np.all((fitted["point_values"] > 0) & (fitted["point_values"] <= 100)))
+                            from scipy.special import expit
+
+                            expected_values = 1e-6 + (100.0 - 1e-6) * expit(fitted["point_logits"])
+                            np.testing.assert_allclose(fitted["point_values"], expected_values, rtol=1e-6)
                     self.assertEqual(label_path.read_bytes(), original_labels)
 
 

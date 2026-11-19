@@ -1,6 +1,45 @@
-# Port validation — 2026-11-18
+# Validation history
 
-## Source comparison
+## Version 1.1.0 — 2026-11-19
+
+The current FastPrep BFC 1.1.0 implementation was compared with the published
+1.0.0 branch. The only changed existing fitting function is `rbf_field`; the
+new helpers are `rbf_control_values` and `bounded_rbf_values`. Gaussian fitting,
+reliable tissue selection, input validation and both historical solvers are
+unchanged. The transferred support and validation modules match FastPrep
+exactly; repository-specific CLI entrypoints and `--max_iter` compatibility remain.
+
+All **37 tests** were exercised successfully in two runs using the commands
+recorded for the original port below:
+
+- Standard suite: 37 discovered, **36 passed**, one opt-in CUDA test skipped,
+  16.547 seconds.
+- Real CUDA integration: the remaining test **passed** for both synthetic T1
+  and T2 images, 55.742 seconds, on an NVIDIA L20. The existing batch pipeline's
+  GPU serialization lock was respected; its configuration and outputs were not
+  changed.
+- Six new kernel tests cover extreme logits, unit initialization, extrapolation,
+  upper-bound roundoff, finite gradients and optimizer overshoot.
+- A new CLI regression verifies that a failed RBF fit still records the model
+  revision and bounds without granting scientific approval.
+- CUDA integration additionally checks field positivity and the upper bound,
+  model/bounds metadata, finite saved logits, bounded actual coefficients, and
+  consistency between exported coefficients and their sigmoid parameterization.
+  Existing geometry, field application, tissue-support and synthetic CV checks
+  still pass for both methods.
+
+The 1.1.0 wheel builds successfully. An isolated extraction outside the checkout
+passed version-metadata and bounded-control checks plus a real anisotropic
+Gaussian smoke test. Both historical solvers and all three console entrypoints
+are included; no FastPrep checkout or model files are needed at runtime.
+
+These are implementation and synthetic-image checks, not new real-subject QC
+evidence. Positive bounded divisors do not prove safe correction magnitudes or
+correct extrapolation. The scientific limitations recorded below still apply.
+
+## Version 1.0.0 — 2026-11-18
+
+### Source comparison
 
 - Base: `f6983fc0308283b1c4574782613222bfa28cd084` on the original `main` branch.
 - Both original solver files match the FastPrep upstream snapshot byte for byte.
@@ -11,7 +50,7 @@
 - Existing example resources, the historical notebook and original citation are
   retained. No private MRI inputs or FastPrep run products are included.
 
-## Executed checks
+### Executed checks
 
 The complete 30-test suite was covered in two runs:
 
@@ -43,7 +82,7 @@ reduce white-matter CV in these examples, preserve spatial geometry and apply
 the exported field according to the documented multiplier/divisor convention.
 This checks the implementation, not anatomical or clinical accuracy.
 
-## Independent package check
+### Independent package check
 
 ```bash
 python -m pip wheel --no-build-isolation --no-deps --wheel-dir /tmp/bfc-wheels .
@@ -57,7 +96,7 @@ not to the source tree or FastPrep. Both solvers and all three console-script
 entry definitions were present in the wheel. No models or MRI example resources
 are required by the installed package.
 
-## Environment and limits
+### Environment and limits
 
 Tested with Python 3.11, NumPy 1.26.4, SciPy 1.11.4, nibabel 5.3.3,
 SimpleITK 2.3.0, scikit-learn 1.9.1, and PyTorch 2.8.0+cu128. These are observed

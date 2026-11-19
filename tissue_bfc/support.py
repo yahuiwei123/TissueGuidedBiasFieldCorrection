@@ -5,6 +5,9 @@ from scipy import ndimage
 
 
 REVISION = "reliable-core-v2"
+RBF_MODEL_REVISION = "bounded-sigmoid-v1"
+RBF_FIELD_MIN = 1e-6
+RBF_FIELD_MAX = 100.0
 
 
 def validate_arrays(image, labels, brain_mask, spacing):
@@ -173,6 +176,17 @@ def cuda_device(device):
     return str(torch.device(device))
 
 
+def rbf_control_values(logits):
+    import torch
+
+    return RBF_FIELD_MIN + (RBF_FIELD_MAX - RBF_FIELD_MIN) * torch.sigmoid(logits)
+
+
+def bounded_rbf_values(points, logits, coordinates, sigma, k_neighbors):
+    values = stable_rbf_values(points, rbf_control_values(logits), coordinates, sigma, k_neighbors)
+    return values.clamp(min=RBF_FIELD_MIN, max=RBF_FIELD_MAX)
+
+
 def rbf_field(source, image, labels, support, *, device="cuda:0", n_points=48, max_iter=25,
               tol=1e-6, soft_sigma=0.5, rbf_sigma=0.05, k_neighbors=48, seed=0):
     import torch
@@ -194,7 +208,7 @@ def rbf_field(source, image, labels, support, *, device="cuda:0", n_points=48, m
             return probabilities
 
         def _eval_bias_field_batch(self, coordinates):
-            return stable_rbf_values(self.points, self.point_values, coordinates, self.rbf_sigma, self.k_neighbors)
+            return bounded_rbf_values(self.points, self.point_values, coordinates, self.rbf_sigma, self.k_neighbors)
 
     scale = float(image[support].max())
     normalized = image.astype(np.float32) / scale
@@ -204,15 +218,28 @@ def rbf_field(source, image, labels, support, *, device="cuda:0", n_points=48, m
                                  rbf_sigma=rbf_sigma, k_neighbors=k_neighbors, device=device)
     if list(corrector.classes) != [2, 3] or np.any(corrector.soft_labels_np[:, ~support] != 0):
         raise ValueError("RBF tissue weights escaped reliable GM/WM support")
+    with torch.no_grad():
+        initial_fraction = (corrector.point_values - RBF_FIELD_MIN) / (RBF_FIELD_MAX - RBF_FIELD_MIN)
+        if not torch.isfinite(initial_fraction).all() or torch.any((initial_fraction <= 0) | (initial_fraction >= 1)):
+            raise ValueError("Initial RBF control values must lie strictly inside the configured bounds")
+        corrector.point_values.copy_(torch.logit(initial_fraction))
     corrector.fit()
     with torch.no_grad():
+        if not torch.isfinite(corrector.points).all() or not torch.isfinite(corrector.point_values).all():
+            raise ValueError("RBF optimization produced nonfinite control parameters")
         field = corrector.get_bias_field()
     torch.cuda.synchronize(torch.device(device))
+    if not np.isfinite(field).all() or np.any(field <= 0) or np.any(field > RBF_FIELD_MAX):
+        raise ValueError("Bounded RBF field must be finite, strictly positive and at most 100")
     fitted = {"points": corrector.points.detach().cpu().numpy(),
-              "point_values": corrector.point_values.detach().cpu().numpy(),
+              "point_values": rbf_control_values(corrector.point_values.detach()).cpu().numpy(),
+              "point_logits": corrector.point_values.detach().cpu().numpy(),
               "initial_points": corrector.init_points, "shape": np.array(image.shape)}
     return field, {"device": device, "gpu_name": torch.cuda.get_device_name(torch.device(device)),
                    "normalization_scale": scale, "offset": 0.0, "active_classes": [2, 3],
+                   "model_revision": RBF_MODEL_REVISION,
+                   "field_bounds": {"minimum": RBF_FIELD_MIN, "maximum": RBF_FIELD_MAX},
+                   "control_parameterization": "minimum + (maximum - minimum) * sigmoid(logit); used in every fitting and export evaluation",
                    "rbf_weight_normalization": "Log-domain softmax in both fitting and export; no additive denominator epsilon",
                    "soft_weight_outside_fit_support": float(probabilities[:, ~support].sum()),
                    "export_autograd": False, "peak_gpu_allocated_bytes": torch.cuda.max_memory_allocated(torch.device(device))}, fitted

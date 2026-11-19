@@ -39,7 +39,7 @@ def main(argv=None, *, default_method="rbf"):
     import nibabel as nib
     import numpy as np
     from . import __version__
-    from .support import REVISION, application_field, apply_field, cuda_device, gaussian_field, rbf_field, reliable_support
+    from .support import REVISION, RBF_FIELD_MIN, RBF_FIELD_MAX, RBF_MODEL_REVISION, application_field, apply_field, cuda_device, gaussian_field, rbf_field, reliable_support
     from .validation import checked_labels, same_grid
 
     if arguments.method == "rbf":
@@ -81,6 +81,9 @@ def main(argv=None, *, default_method="rbf"):
               "parameters": {name: str(value) if isinstance(value, Path) else value for name, value in vars(arguments).items()},
               "source": str(source), "application": "Continuous multiplicative correction across brain, including tissue label zero; input preserved outside brain and at zero signal",
               "scientific_approval": "not_performed"}
+    if arguments.method == "rbf":
+        report["rbf_model_revision"] = RBF_MODEL_REVISION
+        report["rbf_field_bounds"] = {"minimum": RBF_FIELD_MIN, "maximum": RBF_FIELD_MAX}
     report_path = target / "support.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     try:

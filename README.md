@@ -1,7 +1,7 @@
 # Tissue-Guided Bias Field Correction
 
 Reliable-core Gaussian and CUDA RBF bias correction for brain MRI. This revision
-ports the `reliable-core-v2` implementation from FastPrep BFC 1.0.0 back into the
+ports the `reliable-core-v2` implementation from FastPrep BFC 1.1.0 back into the
 original repository. **RBF is the default; it requires CUDA and never silently
 falls back to CPU.** Gaussian is an explicit CPU alternative.
 
@@ -21,6 +21,10 @@ not establish correctness for every anatomy, session, or real T2 acquisition.
 - Use actual nearest supported donors for Gaussian residual extrapolation.
 - Use stable softmax RBF weights in fitting and export, with export gradients
   disabled and explicit CUDA validation.
+- In version 1.1.0, parameterize RBF controls as
+  `1e-6 + (100 - 1e-6) * sigmoid(logit)` during both optimization and export.
+  This keeps the effective controls positive and bounded, rather than clipping
+  a failed field after fitting. The Gaussian algorithm is unchanged in this release.
 - Validate grids, finite values, labels and fields, refuse output overwrites,
   and save fitting support and execution provenance.
 
@@ -103,6 +107,14 @@ Every attempt writes the requested corrected image and field, plus
 `fit-mask.nii.gz`, `fit-labels.nii.gz` and `support.json` next to the corrected
 image. RBF also writes `fitted-control-points.npz`. Use a new output directory
 for every attempt; existing outputs are never overwritten.
+
+In 1.1.0, the RBF archive retains actual coefficients in `point_values` and adds
+the optimized `point_logits`. Provenance records model revision
+`bounded-sigmoid-v1` and field bounds. Initialization still corresponds to
+coefficient 1. The weighted interpolation is bounded against floating-point
+roundoff, and the exported field must be finite, positive and at most 100.
+These bounds concern the raw RBF divisor, not the corrected image or an inverse
+multiplier; they do not establish safe extrapolation or eliminate the need for QC.
 
 **The raw field conventions differ:**
 

@@ -159,6 +159,76 @@ class GaussianTests(SupportTests):
 
 @unittest.skipUnless(AVAILABLE and importlib.util.find_spec("torch"), "RBF kernel tests require PyTorch")
 class RbfKernelTests(unittest.TestCase):
+    def test_control_parameterization_is_positive_and_capped_for_extreme_logits(self):
+        import torch
+        from tissue_bfc.support import RBF_FIELD_MIN, RBF_FIELD_MAX, rbf_control_values
+
+        logits = torch.tensor([-1e30, -1000.0, -20.0, 0.0, 20.0, 1000.0, 1e30])
+        values = rbf_control_values(logits)
+        self.assertTrue(torch.isfinite(values).all())
+        self.assertTrue(torch.all((values > 0) & (values <= RBF_FIELD_MAX)))
+        self.assertEqual(values[0].item(), torch.tensor(RBF_FIELD_MIN).item())
+        self.assertEqual(values[-1].item(), RBF_FIELD_MAX)
+
+    def test_bounded_initialization_preserves_unit_control_values(self):
+        import torch
+        from tissue_bfc.support import RBF_FIELD_MIN, RBF_FIELD_MAX, rbf_control_values
+
+        original = torch.ones(48)
+        logits = torch.logit((original - RBF_FIELD_MIN) / (RBF_FIELD_MAX - RBF_FIELD_MIN))
+        torch.testing.assert_close(rbf_control_values(logits), original, rtol=1e-6, atol=1e-7)
+
+    def test_bounded_interpolation_remains_valid_outside_fitting_support(self):
+        import torch
+        from tissue_bfc.support import bounded_rbf_values
+
+        points = torch.tensor([[0.2, 0.2, 0.2], [0.8, 0.8, 0.8]])
+        logits = torch.tensor([-1000.0, 1000.0])
+        coordinates = torch.tensor([[-10.0, -10.0, -10.0], [0.5, 0.5, 0.5], [10.0, 10.0, 10.0]])
+        output = bounded_rbf_values(points, logits, coordinates, 0.05, 2)
+        self.assertTrue(torch.isfinite(output).all())
+        self.assertTrue(torch.all((output > 0) & (output <= 100)))
+
+    def test_upper_bound_survives_weighted_sum_roundoff(self):
+        import torch
+        from tissue_bfc.support import bounded_rbf_values
+
+        generator = torch.Generator().manual_seed(17)
+        points = torch.rand((48, 3), generator=generator)
+        logits = torch.full((48,), 1000.0)
+        coordinates = torch.rand((97, 3), generator=generator)
+        output = bounded_rbf_values(points, logits, coordinates, 0.05, 48)
+        self.assertTrue(torch.all(output <= 100))
+        torch.testing.assert_close(output, torch.full_like(output, 100.0))
+
+    def test_bounded_parameterization_is_differentiable_during_fitting(self):
+        import torch
+        from tissue_bfc.support import bounded_rbf_values
+
+        points = torch.tensor([[0.2, 0.2, 0.2], [0.4, 0.4, 0.4]], requires_grad=True)
+        logits = torch.tensor([-4.0, -5.0], requires_grad=True)
+        coordinates = torch.tensor([[0.25, 0.25, 0.25], [0.35, 0.35, 0.35]])
+        output = bounded_rbf_values(points, logits, coordinates, 0.05, 2)
+        output.sum().backward()
+        self.assertTrue(torch.isfinite(points.grad).all())
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertTrue(torch.all(logits.grad > 0))
+
+    def test_optimizer_overshoot_cannot_make_effective_control_values_invalid(self):
+        import torch
+        from tissue_bfc.support import rbf_control_values
+
+        logits = torch.nn.Parameter(torch.tensor([-4.0, -4.0]))
+        optimizer = torch.optim.SGD([logits], lr=1e5)
+        optimizer.zero_grad()
+        values = rbf_control_values(logits)
+        (values[0] - values[1]).backward()
+        optimizer.step()
+        self.assertLess(logits[0].item(), -100)
+        self.assertGreater(logits[1].item(), 100)
+        effective = rbf_control_values(logits)
+        self.assertTrue(torch.all((effective > 0) & (effective <= 100)))
+
     def test_constant_control_values_remain_constant_far_outside_fit_support(self):
         import torch
         from tissue_bfc.support import stable_rbf_values
